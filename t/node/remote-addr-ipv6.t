@@ -19,10 +19,11 @@ use t::APISIX;
 no_root_location();
 
 my $travis_os_name = $ENV{TRAVIS_OS_NAME};
-if ($travis_os_name eq "osx") {
-    plan 'no_plan';
+if ((defined $travis_os_name) && $travis_os_name eq "linux") {
+    plan(skip_all =>
+      "skip under Travis CI inux environment which doesn't work well with IPv6");
 } else {
-    plan(skip_all => "skip remote address(IPv6) under linux");
+    plan 'no_plan';
 }
 
 run_tests();
@@ -76,8 +77,8 @@ location /t {
 }
 --- request
 GET /t
---- response_body_like eval
-qr{.*404 Not Found.*}
+--- response_body eval
+qr/"error_msg":"404 Route Not Found"/
 --- no_error_log
 [error]
 
@@ -88,8 +89,8 @@ qr{.*404 Not Found.*}
 --- request
 GET /not_found
 --- error_code: 404
---- response_body_like eval
-qr{.*404 Not Found.*}
+--- response_body eval
+qr/"error_msg":"404 Route Not Found"/
 --- no_error_log
 [error]
 
@@ -107,17 +108,18 @@ location /t {
 }
 --- request
 GET /t
---- response_body
-connected: 1
+--- response_body eval
+qr{connected: 1
 request sent: 59
 received: HTTP/1.1 200 OK
 received: Content-Type: text/plain
+received: Content-Length: 12
 received: Connection: close
-received: Server: openresty
+received: Server: APISIX/\d\.\d+(\.\d+)?
 received: 
 received: hello world
-failed to receive a line: closed []
-close: 1 nil
+failed to receive a line: closed \[\]
+close: 1 nil}
 --- no_error_log
 [error]
 
@@ -128,7 +130,7 @@ close: 1 nil
 --- request
 GET /hello
 --- error_code: 404
---- response_body_like eval
-qr{.*404 Not Found.*}
+--- response_body
+{"error_msg":"404 Route Not Found"}
 --- no_error_log
 [error]

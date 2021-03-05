@@ -16,23 +16,30 @@
 # limitations under the License.
 #
 
-set -ex
-
-export_or_prefix() {
-    export OPENRESTY_PREFIX="/usr/local/openresty-debug"
-}
-
-create_lua_deps() {
-    sudo luarocks make --lua-dir=${OPENRESTY_PREFIX}/luajit rockspec/apisix-master-0.rockspec --tree=deps --only-deps --local
-    sudo luarocks install --lua-dir=${OPENRESTY_PREFIX}/luajit lua-resty-libr3 --tree=deps --local
-    echo "Create lua deps cache"
-    sudo rm -rf build-cache/deps
-    sudo cp -r deps build-cache/
-    sudo cp rockspec/apisix-master-0.rockspec build-cache/
-}
+. ./.travis/common.sh
 
 before_install() {
     sudo cpanm --notest Test::Nginx >build.log 2>&1 || (cat build.log && exit 1)
+    docker pull redis:3.0-alpine
+    docker run --rm -itd -p 6379:6379 --name apisix_redis redis:3.0-alpine
+    docker run --rm -itd -e HTTP_PORT=8888 -e HTTPS_PORT=9999 -p 8888:8888 -p 9999:9999 mendhak/http-https-echo
+    # Runs Keycloak version 10.0.2 with inbuilt policies for unit tests
+    docker run --rm -itd -e KEYCLOAK_USER=admin -e KEYCLOAK_PASSWORD=123456 -p 8090:8080 -p 8443:8443 sshniro/keycloak-apisix
+    # spin up kafka cluster for tests (1 zookeper and 1 kafka instance)
+    docker pull bitnami/zookeeper:3.6.0
+    docker pull bitnami/kafka:latest
+    docker network create kafka-net --driver bridge
+    docker run --name zookeeper-server -d -p 2181:2181 --network kafka-net -e ALLOW_ANONYMOUS_LOGIN=yes bitnami/zookeeper:3.6.0
+    docker run --name kafka-server1 -d --network kafka-net -e ALLOW_PLAINTEXT_LISTENER=yes -e KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper-server:2181 -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092 -p 9092:9092 -e KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true bitnami/kafka:latest
+    docker pull bitinit/eureka
+    docker run --name eureka -d -p 8761:8761 --env ENVIRONMENT=apisix --env spring.application.name=apisix-eureka --env server.port=8761 --env eureka.instance.ip-address=127.0.0.1 --env eureka.client.registerWithEureka=true --env eureka.client.fetchRegistry=false --env eureka.client.serviceUrl.defaultZone=http://127.0.0.1:8761/eureka/ bitinit/eureka
+    sleep 5
+    docker exec -i kafka-server1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server:2181 --replication-factor 1 --partitions 1 --topic test2
+    docker exec -i kafka-server1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server:2181 --replication-factor 1 --partitions 3 --topic test3
+
+    # start consul servers
+    docker run --rm --name consul_1 -d -p 8500:8500 consul:1.7 consul agent -server -bootstrap-expect=1 -client 0.0.0.0 -log-level info -data-dir=/consul/data
+    docker run --rm --name consul_2 -d -p 8600:8500 consul:1.7 consul agent -server -bootstrap-expect=1 -client 0.0.0.0 -log-level info -data-dir=/consul/data
 }
 
 tengine_install() {
@@ -45,28 +52,93 @@ tengine_install() {
         return
     fi
 
-    wget https://openresty.org/download/openresty-1.15.8.2.tar.gz
-    tar zxf openresty-1.15.8.2.tar.gz
+    export OPENRESTY_VERSION=1.17.8.2
+    wget https://openresty.org/download/openresty-$OPENRESTY_VERSION.tar.gz
+    tar zxf openresty-$OPENRESTY_VERSION.tar.gz
     wget https://codeload.github.com/alibaba/tengine/tar.gz/2.3.2
     tar zxf 2.3.2
-    wget https://codeload.github.com/openresty/luajit2/tar.gz/v2.1-20190912
-    tar zxf v2.1-20190912
-    wget https://codeload.github.com/simplresty/ngx_devel_kit/tar.gz/v0.3.1
-    tar zxf v0.3.1
 
-    rm -rf openresty-1.15.8.2/bundle/nginx-1.15.8
-    mv tengine-2.3.2 openresty-1.15.8.2/bundle/
+    rm -rf openresty-$OPENRESTY_VERSION/bundle/nginx-1.17.8
+    mv tengine-2.3.2 openresty-$OPENRESTY_VERSION/bundle/
 
-    rm -rf openresty-1.15.8.2/bundle/LuaJIT-2.1-20190507
-    mv luajit2-2.1-20190912 openresty-1.15.8.2/bundle/
+    sed -i 's/= auto_complete "nginx";/= auto_complete "tengine";/g' openresty-$OPENRESTY_VERSION/configure
 
-    rm -rf openresty-1.15.8.2/bundle/ngx_devel_kit-0.3.1rc1
-    mv ngx_devel_kit-0.3.1 openresty-1.15.8.2/bundle/
+    cd openresty-$OPENRESTY_VERSION
 
-    sed -i "s/= auto_complete 'LuaJIT';/= auto_complete 'luajit2';/g" openresty-1.15.8.2/configure
-    sed -i 's/= auto_complete "nginx";/= auto_complete "tengine";/g' openresty-1.15.8.2/configure
+    # patching start
+    # https://github.com/alibaba/tengine/issues/1381#issuecomment-541493008
+    # other patches for tengine 2.3.2 from upstream openresty
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-always_enable_cc_feature_tests.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-balancer_status_code.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-cache_manager_exit.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-daemon_destroy_pool.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-delayed_posted_events.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-hash_overflow.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-init_cycle_pool_release.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-larger_max_error_str.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-log_escape_non_ascii.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-no_Werror.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-pcre_conf_opt.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-proxy_host_port_vars.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-resolver_conf_parsing.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-reuseport_close_unused_fds.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-safe_resolver_ipv6_option.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-single_process_graceful_exit.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-ssl_cert_cb_yield.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-ssl_sess_cb_yield.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-stream_balancer_export.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-stream_proxy_get_next_upstream_tries.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-stream_proxy_timeout_fields.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-stream_ssl_preread_no_skip.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-upstream_pipelining.patch
+    wget -P patches https://raw.githubusercontent.com/openresty/openresty/master/patches/nginx-1.17.4-upstream_timeout_fields.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/openresty/master/patches/tengine-2.3.2-privileged_agent_process.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-delete_unused_variable.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-keepalive_post_request_status.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-tolerate_backslash_zero_in_uri.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-avoid-limit_req_zone-directive-in-multiple-variables.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-segmentation-fault-in-master-process.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-support-dtls-offload.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-support-prometheus-to-upstream_check_module.patch
+    wget -P patches https://raw.githubusercontent.com/totemofwolf/tengine/feature/patches/tengine-2.3.2-vnswrr-adaptated-to-dynamic_resolve.patch
 
-    cd openresty-1.15.8.2
+    cd bundle/tengine-2.3.2
+    patch -p1 < ../../patches/nginx-1.17.4-always_enable_cc_feature_tests.patch
+    patch -p1 < ../../patches/nginx-1.17.4-balancer_status_code.patch
+    patch -p1 < ../../patches/nginx-1.17.4-cache_manager_exit.patch
+    patch -p1 < ../../patches/nginx-1.17.4-daemon_destroy_pool.patch
+    patch -p1 < ../../patches/nginx-1.17.4-delayed_posted_events.patch
+    patch -p1 < ../../patches/nginx-1.17.4-hash_overflow.patch
+    patch -p1 < ../../patches/nginx-1.17.4-init_cycle_pool_release.patch
+    patch -p1 < ../../patches/nginx-1.17.4-larger_max_error_str.patch
+    patch -p1 < ../../patches/nginx-1.17.4-log_escape_non_ascii.patch
+    patch -p1 < ../../patches/nginx-1.17.4-no_Werror.patch
+    patch -p1 < ../../patches/nginx-1.17.4-pcre_conf_opt.patch
+    patch -p1 < ../../patches/nginx-1.17.4-proxy_host_port_vars.patch
+    patch -p1 < ../../patches/nginx-1.17.4-resolver_conf_parsing.patch
+    patch -p1 < ../../patches/nginx-1.17.4-reuseport_close_unused_fds.patch
+    patch -p1 < ../../patches/nginx-1.17.4-safe_resolver_ipv6_option.patch
+    patch -p1 < ../../patches/nginx-1.17.4-single_process_graceful_exit.patch
+    patch -p1 < ../../patches/nginx-1.17.4-ssl_cert_cb_yield.patch
+    patch -p1 < ../../patches/nginx-1.17.4-ssl_sess_cb_yield.patch
+    patch -p1 < ../../patches/nginx-1.17.4-stream_balancer_export.patch
+    patch -p1 < ../../patches/nginx-1.17.4-stream_proxy_get_next_upstream_tries.patch
+    patch -p1 < ../../patches/nginx-1.17.4-stream_proxy_timeout_fields.patch
+    patch -p1 < ../../patches/nginx-1.17.4-stream_ssl_preread_no_skip.patch
+    patch -p1 < ../../patches/nginx-1.17.4-upstream_pipelining.patch
+    patch -p1 < ../../patches/nginx-1.17.4-upstream_timeout_fields.patch
+    patch -p1 < ../../patches/tengine-2.3.2-privileged_agent_process.patch
+    patch -p1 < ../../patches/tengine-2.3.2-delete_unused_variable.patch
+    patch -p1 < ../../patches/tengine-2.3.2-keepalive_post_request_status.patch
+    patch -p1 < ../../patches/tengine-2.3.2-tolerate_backslash_zero_in_uri.patch
+    patch -p1 < ../../patches/tengine-2.3.2-avoid-limit_req_zone-directive-in-multiple-variables.patch
+    patch -p1 < ../../patches/tengine-2.3.2-segmentation-fault-in-master-process.patch
+    patch -p1 < ../../patches/tengine-2.3.2-support-dtls-offload.patch
+    patch -p1 < ../../patches/tengine-2.3.2-support-prometheus-to-upstream_check_module.patch
+    patch -p1 < ../../patches/tengine-2.3.2-vnswrr-adaptated-to-dynamic_resolve.patch
+
+    cd -
+    # patching end
 
     ./configure --prefix=${OPENRESTY_PREFIX} --with-debug \
         --with-compat \
@@ -101,19 +173,19 @@ tengine_install() {
         --add-module=bundle/tengine-2.3.2/modules/mod_dubbo \
         --add-module=bundle/tengine-2.3.2/modules/ngx_multi_upstream_module \
         --add-module=bundle/tengine-2.3.2/modules/mod_config \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_concat_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_footer_filter_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_proxy_connect_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_reqstat_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_concat_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_footer_filter_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_proxy_connect_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_reqstat_module \
         --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_slice_module \
         --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_sysguard_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_trim_filter_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_trim_filter_module \
         --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_check_module \
         --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_consistent_hash_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_dynamic_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_dyups_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_dynamic_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_dyups_module \
         --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_upstream_session_sticky_module \
-        --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_http_user_agent_module \
+        --add-module=bundle/tengine-2.3.2/modules/ngx_http_user_agent_module \
         --add-dynamic-module=bundle/tengine-2.3.2/modules/ngx_slab_stat \
         > build.log 2>&1 || (cat build.log && exit 1)
 
@@ -126,24 +198,28 @@ tengine_install() {
     mkdir -p build-cache${OPENRESTY_PREFIX}
     cp -r ${OPENRESTY_PREFIX}/* build-cache${OPENRESTY_PREFIX}
     ls build-cache${OPENRESTY_PREFIX}
-    rm -rf openresty-1.15.8.2
+    rm -rf openresty-${OPENRESTY_VERSION}
+
+    wget -qO - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
+    sudo apt-get -y update --fix-missing
+    sudo apt-get -y install software-properties-common
+    sudo add-apt-repository -y "deb https://openresty.org/package/ubuntu $(lsb_release -sc) main"
+    sudo apt-get update
+    sudo apt-get install openresty-openssl-debug-dev
 }
 
 do_install() {
     export_or_prefix
 
-    wget -qO - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
     sudo apt-get -y update --fix-missing
     sudo apt-get -y install software-properties-common
-    sudo add-apt-repository -y ppa:longsleep/golang-backports
 
     sudo apt-get update
+    sudo apt-get install lua5.1 liblua5.1-0-dev
 
     tengine_install
 
-    sudo luarocks install --lua-dir=${OPENRESTY_PREFIX}/luajit luacov-coveralls
-
-    export GO111MOUDULE=on
+    ./utils/linux-install-luarocks.sh
 
     if [ ! -f "build-cache/apisix-master-0.rockspec" ]; then
         create_lua_deps
@@ -159,31 +235,23 @@ do_install() {
         fi
     fi
 
+    sudo luarocks install luacheck > build.log 2>&1 || (cat build.log && exit 1)
+
+    ./utils/linux-install-etcd-client.sh
+
     git clone https://github.com/iresty/test-nginx.git test-nginx
-    wget -P utils https://raw.githubusercontent.com/iresty/openresty-devel-utils/iresty/lj-releng
-	chmod a+x utils/lj-releng
+    make utils
 
     git clone https://github.com/apache/openwhisk-utilities.git .travis/openwhisk-utilities
     cp .travis/ASF* .travis/openwhisk-utilities/scancode/
 
     ls -l ./
-    if [ ! -f "build-cache/grpc_server_example" ]; then
-        sudo apt-get install golang
-
-        git clone https://github.com/iresty/grpc_server_example.git grpc_server_example
-
-        cd grpc_server_example/
-        go build -o grpc_server_example main.go
-        mv grpc_server_example ../build-cache/
-        cd ..
-    fi
 }
 
 script() {
     export_or_prefix
-    export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$OPENRESTY_PREFIX/bin:$PATH
     openresty -V
-    sudo service etcd start
+
 
     ./build-cache/grpc_server_example &
 
@@ -195,8 +263,8 @@ script() {
     sleep 1
     ./bin/apisix stop
     sleep 1
-    make check || exit 1
-    APISIX_ENABLE_LUACOV=1 prove -Itest-nginx/lib -r t
+    make lint && make license-check || exit 1
+    # APISIX_ENABLE_LUACOV=1 PERL5LIB=.:$PERL5LIB prove -Itest-nginx/lib -r t
 }
 
 after_success() {

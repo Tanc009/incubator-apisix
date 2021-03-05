@@ -60,12 +60,12 @@ passed
 
 
 
-=== TEST 2: not hit: name=unkown
+=== TEST 2: not hit: name=unknown
 --- request
-GET /hello?name=unkown
+GET /hello?name=unknown
 --- error_code: 404
---- response_body eval
-qr/404 Not Found/
+--- response_body
+{"error_msg":"404 Route Not Found"}
 --- no_error_log
 [error]
 

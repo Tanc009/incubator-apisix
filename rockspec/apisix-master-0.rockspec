@@ -14,40 +14,57 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
+
 package = "apisix"
 version = "master-0"
 supported_platforms = {"linux", "macosx"}
 
 source = {
-    url = "git://github.com/apache/incubator-apisix",
+    url = "git://github.com/apache/apisix",
     branch = "master",
 }
 
 description = {
-    summary = "APISIX is a cloud-native microservices API gateway, delivering the ultimate performance, security, open source and scalable platform for all your APIs and microservices.",
-    homepage = "https://github.com/apache/incubator-apisix",
+    summary = "Apache APISIX is a cloud-native microservices API gateway, delivering the ultimate performance, security, open source and scalable platform for all your APIs and microservices.",
+    homepage = "https://github.com/apache/apisix",
     license = "Apache License 2.0",
-    maintainer = "Yuansheng Wang <membphis@gmail.com>"
 }
 
 dependencies = {
+    "lua-resty-ctxdump = 0.1-0",
+    "lua-resty-dns-client = 5.2.0",
     "lua-resty-template = 1.9",
-    "lua-resty-etcd = 0.7",
+    "lua-resty-etcd = 1.4.3",
     "lua-resty-balancer = 0.02rc5",
-    "lua-resty-ngxvar = 0.4",
+    "lua-resty-ngxvar = 0.5.2",
     "lua-resty-jit-uuid = 0.0.7",
-    "lua-resty-healthcheck-iresty = 1.0.1",
+    "lua-resty-healthcheck-api7 = 2.2.0",
     "lua-resty-jwt = 0.2.0",
+    "lua-resty-hmac-ffi = 0.05",
     "lua-resty-cookie = 0.1.0",
     "lua-resty-session = 2.24",
     "opentracing-openresty = 0.1",
-    "lua-resty-radixtree = 1.5",
+    "lua-resty-radixtree = 2.6.1",
     "lua-protobuf = 0.3.1",
     "lua-resty-openidc = 1.7.2-1",
     "luafilesystem = 1.7.0-2",
-    "lua-tinyyaml = 0.1",
-    "iresty-nginx-lua-prometheus = 0.20190917",
-    "jsonschema = 0.3",
+    "lua-tinyyaml = 1.0",
+    "nginx-lua-prometheus = 0.20201218",
+    "jsonschema = 0.9.3",
+    "lua-resty-ipmatcher = 0.6",
+    "lua-resty-kafka = 0.07",
+    "lua-resty-logger-socket = 2.0-0",
+    "skywalking-nginx-lua = 0.3-0",
+    "base64 = 1.5-2",
+    "binaryheap = 0.4",
+    "dkjson = 2.5-2",
+    "resty-redis-cluster = 1.02-4",
+    "lua-resty-expr = 1.1.0",
+    "graphql = 0.0.2",
+    "argparse = 0.7.1-1",
+    "luasocket = 3.0rc1-2",
+    "luasec = 0.9-1",
+    "lua-resty-consul = 0.3-2",
 }
 
 build = {
@@ -59,6 +76,8 @@ build = {
         LUA_BINDIR="$(LUA_BINDIR)",
         LUA_INCDIR="$(LUA_INCDIR)",
         LUA="$(LUA)",
+        OPENSSL_INCDIR="$(OPENSSL_INCDIR)",
+        OPENSSL_LIBDIR="$(OPENSSL_LIBDIR)",
     },
     install_variables = {
         INST_PREFIX="$(PREFIX)",

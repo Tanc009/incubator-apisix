@@ -37,16 +37,17 @@ __DATA__
                 res.status = code
             end
 
-            ngx.print(core.json.encode(res.body))
+            ngx.print(require("toolkit.json").encode(res.body))
             ngx.sleep(1)
         }
     }
 --- request
 GET /t
+--- wait: 1
 --- grep_error_log eval
 qr/\[error\].*/
 --- grep_error_log_out eval
-qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it shoud be a object}
+qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it should be an object}
 --- response_body_like eval
 qr/"value":"mexxxxxxxxxxxxxxx"/
 
@@ -56,12 +57,13 @@ qr/"value":"mexxxxxxxxxxxxxxx"/
 --- request
 GET /not_found
 --- error_code: 404
---- response_body_like eval
-qr/404 Not Found/
+--- response_body
+{"error_msg":"404 Route Not Found"}
+--- wait: 1
 --- grep_error_log eval
 qr/\[error\].*/
 --- grep_error_log_out eval
-qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it shoud be a object}
+qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it should be an object}
 
 
 
@@ -94,10 +96,11 @@ qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it shoud b
 GET /t
 --- response_body
 passed
+--- wait: 1
 --- grep_error_log eval
 qr/\[error\].*/
 --- grep_error_log_out eval
-qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it shoud be a object}
+qr{invalid item data of \[/apisix/routes/1\], val: mexxxxxxxxxxxxxxx, it should be an object}
 
 
 
@@ -115,3 +118,46 @@ GET /t
 done
 --- no_error_log
 [error]
+
+
+
+=== TEST 5: set route(with invalid host)
+--- config
+    location /t {
+        content_by_lua_block {
+            local t = require("lib.test_admin").test
+            local code, body = t('/apisix/admin/routes/1',
+                 ngx.HTTP_PUT,
+                 [[{
+                    "uri": "/server_port",
+                    "upstream": {
+                        "key": "remote_addr",
+                        "type": "chash",
+                        "nodes": {
+                            "xxxx.invalid:1980": 1
+                        }
+                    }
+                }]]
+                )
+
+            if code >= 300 then
+                ngx.status = code
+            end
+            ngx.say(body)
+        }
+    }
+--- request
+GET /t
+--- response_body
+passed
+--- no_error_log
+[error]
+
+
+
+=== TEST 6: hit route
+--- request
+GET /server_port
+--- error_code: 503
+--- error_log
+failed to parse domain: xxxx.invalid
